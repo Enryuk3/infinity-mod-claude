@@ -1,0 +1,6 @@
+{
+  "name": "infinity-mod-claude",
+  "owner": { "name": "Enryuk3" },
+  "description": "Satoru Gojo para Claude Code",
+  "plugins": [{ "name": "infinity", "source": "./" }]
+}
