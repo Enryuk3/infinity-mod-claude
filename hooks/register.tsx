@@ -412,6 +412,8 @@ async function speak($: $, name: string, text: string) {
 }
 
 const TECHNIQUE_DUCKED_GAIN = 0.4
+// The kya when Infinity blocks a command, at half volume: at full it startles
+const KYA_GAIN = 0.5
 // The techniques' voice, level with the effect under it and with Purple's own clip (gain runs 0 to 4)
 const TECHNIQUE_VOICE_GAIN = 0.5
 
@@ -586,9 +588,10 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const label = e.tool === 'Bash' ? lethal(e.command) : null
     if (label) {
-      // Gojo's Infinity is always on: the ring shows, silently, the moment something hits it
+      // Gojo's Infinity is always on: the ring shows the moment something hits it, with a kya!
       scene.infinitySince = Date.now()
       feel($, 'oops', OOPS_MS)
+      void play($, { asset: 'sounds/kya.mp3' }, KYA_GAIN).catch(() => {})
 
       return { deny: `∞ Infinity detuvo "${label}": es irreversible. Pídele al usuario que lo ejecute él si de verdad hace falta.` }
     }

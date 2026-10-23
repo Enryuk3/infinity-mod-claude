@@ -92,15 +92,18 @@ test('Púrpura pide a Azul y Rojo primero', async ($, on) => {
   expect(await run($, 'murasaki')).toContain('Falta /ao y /aka')
 })
 
-test('Infinity bloquea en silencio', async ($, on) => {
+test('Infinity bloquea con un kya!', async ($, on) => {
   const played: string[] = []
+  on('process.run', (_, e) => ({ value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('audio.play', (_, e) => {
     played.push(JSON.stringify(e))
     return { value: undefined }
   })
 
   await $.tool.call({ tool: 'Bash', command: 'rm -rf node_modules' })
-  expect(played).toEqual([])
+  // The kya plays alongside the refusal, a few awaits behind it
+  for (let i = 0; i < 20; i += 1) await Promise.resolve()
+  expect(played.some(p => p.includes('sounds/kya.mp3'))).toBe(true)
 })
 
 test('Satoru se dibuja en cada estado, técnica y dominio', async () => {
