@@ -17,11 +17,21 @@ const LETHAL_COMMANDS: [string, string][] = [
   ['psql -c "TRUNCATE TABLE players"', 'DROP/TRUNCATE'],
   ['psql -c "truncate players;"', 'DROP/TRUNCATE'],
   ['psql -c "TRUNCATE players"', 'DROP/TRUNCATE'],
+  ['echo hi; rm -rf dist', 'rm -r'],
+  ['sudo rm -rf /var/cache/app', 'rm -r'],
+  [`bash -c 'rm -rf build'`, 'rm -r'],
+  [`ssh box 'cd /srv && git reset --hard'`, 'git reset --hard'],
+  ['echo "$(rm -rf dist)"', 'rm -r'],
+  ["psql <<'SQL'\nDROP TABLE players;\nSQL", 'DROP/TRUNCATE'],
+  ['echo "DROP TABLE players" | psql', 'DROP/TRUNCATE'],
 ]
 const SAFE = [
   'git push origin main --force-with-lease', 'git clean -n', 'rm notes.txt', 'pnpm lint', 'git checkout main',
   `printf '<p class="truncate text-sm">' > card.html`, 'rg -n "truncate" src', `echo '<p class="truncate block">'`, 'echo "<p className={\'truncate block\'}>"',
 `sd 'truncate' 'line-clamp-1' src/App.tsx`,
+  // Only naming one, as a search pattern, a message or a line printed, runs nothing
+  'rg -n "rm -rf" src', `grep -rn 'git push --force' docs`, 'git commit -m "docs: explain the rm -rf guard"',
+  `echo 'git reset --hard'`, 'rg "DROP TABLE" migrations', `sd 'TRUNCATE TABLE' 'DELETE FROM' schema.sql`,
 ]
 
 const run = ($: Parameters<TestBody>[0], command: string) =>
@@ -32,16 +42,46 @@ test('Infinity reconoce lo irreversible y deja pasar lo demás', async () => {
   for (const command of SAFE) expect(lethal(command)).toBeNull()
 })
 
-test('Infinity detiene lo letal sin ejecutarlo', async ($, on) => {
-  let reached = 0
-  on('tool.call', { tool: 'Bash' }, () => {
-    reached += 1
-    return { result: { stdout: 'ok', stderr: '', interrupted: false } }
-  })
+/** A machine where each command the measuring runs answers what `outputs` says for it. */
+const machine = (outputs: Record<string, string>) => (_: unknown, e: { argv: readonly string[] }) => {
+  const key = Object.keys(outputs).find(prefix => e.argv.join(' ').startsWith(prefix))
+  return { value: { exitCode: 0, stdout: key ? outputs[key]! : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+}
 
-  const result = await $.tool.call({ tool: 'Bash', command: 'rm -rf node_modules' })
-  expect(result.deny).toContain('Infinity detuvo')
-  expect(reached).toBe(0)
+test('Infinity pregunta antes de un rm -r, con los archivos que borraría', async ($, on) => {
+  on('process.run', machine({
+    'printenv HOME': '/home/satoru\n',
+    'find ./node_modules': 'node_modules/a.js\nnode_modules/b.js\n',
+    'du -sk': '2048\t./node_modules\n',
+  }))
+  on('tool.check', () => ({ decision: 'allow' as const }))
+
+  const verdict = await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf node_modules' } })
+  expect(verdict.decision).toBe('ask')
+  expect(verdict.reason).toContain('"rm -r" es irreversible')
+  expect(verdict.reason).toContain('Borraría 2 archivos (2.0 MB) en node_modules:')
+  expect(verdict.reason).toContain('node_modules/a.js y node_modules/b.js.')
+  expect(verdict.reason).toContain('node_modules/a.js')
+})
+
+test('Infinity pregunta antes de un reset, con los cambios que se perderían', async ($, on) => {
+  on('process.run', machine({
+    'git status': ' M src/a.ts\n M src/b.ts\n',
+    'git diff --shortstat': ' 2 files changed, 3 insertions(+)\n',
+  }))
+  on('tool.check', () => ({ decision: 'allow' as const }))
+
+  const verdict = await $.tool.check({ tool: 'Bash', input: { command: ['git', 'reset', '--hard'].join(' ') } })
+  expect(verdict.decision).toBe('ask')
+  expect(verdict.reason).toContain('Perdería los cambios sin commit de 2 archivos')
+  expect(verdict.reason).toContain('src/b.ts')
+})
+
+test('Infinity no pregunta por lo que no es irreversible', async ($, on) => {
+  on('tool.check', () => ({ decision: 'allow' as const }))
+
+  expect((await $.tool.check({ tool: 'Bash', input: { command: 'rg -n "rm -rf" src' } })).decision).toBe('allow')
+  expect((await $.tool.check({ tool: 'Read', input: { file_path: 'a.ts' } })).decision).toBe('allow')
 })
 
 test('Infinity deja pasar lo que no es letal', async ($, on) => {
@@ -92,16 +132,18 @@ test('Púrpura pide a Azul y Rojo primero', async ($, on) => {
   expect(await run($, 'murasaki')).toContain('Falta /ao y /aka')
 })
 
-test('Infinity bloquea con un kya!', async ($, on) => {
+test('Infinity suena con un kya! al detener un comando', async ($, on) => {
   const played: string[] = []
-  on('process.run', (_, e) => ({ value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.run', machine({ uname: 'Darwin\n' }))
   on('audio.play', (_, e) => {
     played.push(JSON.stringify(e))
     return { value: undefined }
   })
+  on('tool.check', () => ({ decision: 'allow' as const }))
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
 
   await $.tool.call({ tool: 'Bash', command: 'rm -rf node_modules' })
-  // The kya plays alongside the refusal, a few awaits behind it
+  // The kya plays alongside the question, a few awaits behind it
   for (let i = 0; i < 20; i += 1) await Promise.resolve()
   expect(played.some(p => p.includes('sounds/kya.mp3'))).toBe(true)
 })

@@ -40,6 +40,12 @@ sudo apt install ffmpeg
 
 En WSL el audio sale a Windows a través de WSLg (Windows 11, o WSL actualizado en Windows 10).
 
+## Infinity
+
+Antes de que Claude corra algo irreversible, Infinity mide qué tocaría y te lo pregunta en el diálogo de permiso: los archivos que borraría un `rm -r`, los cambios sin commit que perdería un `git reset --hard` o un `git checkout .`, lo que borraría un `git clean -f`, los commits del remoto que sobrescribiría un `git push --force`, o la sentencia `DROP`/`TRUNCATE` que mandaría a la base. Tú decides si pasa. Sin nadie a quien preguntar (`claude -p`), no pasa.
+
+Un comando que solo menciona uno de esos, como un patrón de búsqueda o un mensaje de commit, no cuenta.
+
 ## Comandos
 
 - `/satoru`: muestra u oculta a Satoru

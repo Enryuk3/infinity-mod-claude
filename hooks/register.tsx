@@ -1,7 +1,8 @@
 import type { AudioClip, EngineInterface, Register, Timer } from 'claude-code'
 
 import { finishMurasaki, fireAka, fireAo, fireMurasaki, isCasting, keptScene, restoreScene, scene, toggleDomain } from './scene'
-import { lethal } from './lethal'
+import { lethal, lethalPart } from './lethal'
+import { measure } from './radius'
 import { wordFor } from './words'
 import { DESIGN_MODEL, DESIGN_SAMPLE, ELEVEN_API, ELEVEN_JA_MODEL, ELEVEN_MODEL, GOJO_VOICE, audioOf, createdVoice, firstPreview, firstVoice, lineHash, refusalOf } from './voice'
 import { BAND_MAX_PX, COMPACT_ROWS, bandFrame, bandSvg, satoru, YUJI_WALK_MS } from './satoru'
@@ -62,6 +63,8 @@ let hasWritten = false
 const PRESENCE_MS = 3000
 // A file not touched in this long is a conversation that closed without saying so
 const STALE_MS = 12_000
+// A file not touched in a day is forgotten: removed, so closed conversations don't pile up
+const FORGET_MS = 24 * 60 * 60 * 1000
 let presence: Timer | undefined
 let sessionFile = ''
 let othersKey = ''
@@ -279,14 +282,23 @@ const myState = (): SessionState => (scene.isWorking ? 'working' : hasFinished ?
 const STATE_ORDER: SessionState[] = ['working', 'done', 'idle']
 const isSessionState = (value: unknown): value is SessionState => STATE_ORDER.includes(value as SessionState)
 
-/** Writes this conversation's state and reads everyone else's; the band redraws only when the others change. */
+/**
+ * Writes this conversation's state and reads everyone else's; the band redraws only when the others change. A
+ * conversation that ends takes its file with it, and files left by ones that closed without saying so are removed.
+ */
 async function beat($: $, state: SessionState | 'ended' = myState()) {
   const dir = `${$.plugin.root}/../.infinity-sessions`
   if (!sessionFile) sessionFile = `${await $.session.id()}.json`
+  // $.fs writes but doesn't remove: rm -f on named files, never a folder
+  if (state === 'ended') {
+    await $.process.run(['rm', '-f', `${dir}/${sessionFile}`])
+    return
+  }
   await $.fs.write(`${dir}/${sessionFile}`, JSON.stringify({ state }))
-  if (state === 'ended') return
   const now = Date.now()
   const entries = await $.fs.list(dir)
+  const forgotten = entries.filter(f => f.kind === 'file' && f.name.endsWith('.json') && now - f.mtimeMs > FORGET_MS)
+  if (forgotten.length > 0) void $.process.run(['rm', '-f', ...forgotten.map(f => `${dir}/${f.name}`)]).catch(() => {})
   const fresh = entries.filter(f => f.kind === 'file' && f.name.endsWith('.json') && f.name !== sessionFile && now - f.mtimeMs < STALE_MS)
   const states = await Promise.all(
     fresh.map(f => $.fs.read(`${dir}/${f.name}`).then(text => (JSON.parse(String(text)) as { state?: unknown }).state).catch(() => undefined)),
@@ -585,17 +597,30 @@ export const register: Register = on => {
     return started
   })
 
-  on('tool.call', async ($, e, next) => {
-    const label = e.tool === 'Bash' ? lethal(e.command) : null
-    if (label) {
-      // Gojo's Infinity is always on: the ring shows the moment something hits it, with a kya!
+  // Lo irreversible no pasa sin ti: Infinity mide qué tocaría y te lo pregunta en el diálogo de permiso. Where nobody
+  // can be asked (claude -p, a host without a person) the engine takes the ask as a refusal
+  on('tool.check', async ($, e, next) => {
+    const command = e.tool === 'Bash' ? (e.input as { command?: unknown }).command : undefined
+    const part = typeof command === 'string' ? lethalPart(command) : null
+    if (!part) return next(e)
+    // Only a real call hits the ring, with a kya!; a query asks nothing of anyone
+    if (e.tool_use_id !== undefined) {
       scene.infinitySince = Date.now()
       feel($, 'oops', OOPS_MS)
       void play($, { asset: 'sounds/kya.mp3' }, KYA_GAIN).catch(() => {})
-
-      return { deny: `∞ Infinity detuvo "${label}": es irreversible. Pídele al usuario que lo ejecute él si de verdad hace falta.` }
     }
+    const radius = await measure($, part).catch(() => ['No pude medir qué tocaría.'])
 
+    return { decision: 'ask', reason: [`∞ Infinity: "${part.label}" es irreversible.`, ...radius].join('\n') }
+  }).catch(($, e, next) => {
+    // Fail closed: a check that broke, or one asked beneath its own measuring, lets nothing irreversible through
+    const command = e.tool === 'Bash' ? (e.input as { command?: unknown }).command : undefined
+    const label = typeof command === 'string' ? lethal(command) : null
+
+    return label ? { decision: 'deny', reason: `∞ Infinity no pudo revisar "${label}", así que no lo deja pasar.` } : next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
     // A subagent's own calls are Yuji's work, not Gojo's: they don't change his face
     if (e.agentId !== undefined) return next(e)
     const isSpawn = e.tool === 'Agent'
@@ -610,7 +635,7 @@ export const register: Register = on => {
 
     return ran
   }).catch(($, e, next) => {
-    // Fail closed: if the hook broke before the call ran, a lethal command still doesn't run
+    // Fail closed: if this hook broke before the call ran, a lethal command still doesn't run
     const label = e.tool === 'Bash' ? lethal(e.command) : null
 
     return label && !next.called ? { deny: `∞ Infinity detuvo "${label}".` } : next(e)
