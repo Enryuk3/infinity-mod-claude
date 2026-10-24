@@ -97,7 +97,7 @@ test('Infinity deja pasar lo que no es letal', async ($, on) => {
 })
 
 test('Expansión de Dominio abre y cierra el Vacío Ilimitado', async ($, on) => {
-  // The voice is ElevenLabs' now: without a key it stays quiet, and the domain still opens and closes
+  // The domain's clip plays from sounds/; muted here, the domain still opens and closes
   on('audio.play', () => ({ value: undefined }))
 
   expect(await run($, 'domain')).toContain('Vacío Ilimitado')

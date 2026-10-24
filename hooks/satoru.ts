@@ -301,6 +301,22 @@ function gojoPixels(pose: Pose): Pixel[] {
   return out
 }
 
+/**
+ * Gojo outside Claude, for satoru-notify's panel and its desktop Satoru: hands at his sides, two fingers raised while
+ * working, thumb up once done, the blindfold off in the domain. `w:h:` then `x,y,rrggbb` pixels split by `;`.
+ */
+export function spriteText(state: SessionState, isUnveiled = false): string {
+  const gesture: Gesture = {
+    blindfoldY: isUnveiled ? null : 1, isHandAtFace: false, isSign: false, isClasped: false, isPocket: false, isFocus: state === 'working', cast: null,
+  }
+  const pixels = gojoPixels({ look: { dx: 0, dy: 0, isClosed: false }, armUp: [false, state === 'done'], legStep: null, face: SKIN, gesture })
+  const w = Math.max(...pixels.map(([x]) => x)) + 1
+
+  return `${w}:${SPRITE_H}:${encodePixels(pixels)}`
+}
+
+const encodePixels = (pixels: Pixel[]) => pixels.map(([x, y, c]) => `${x},${y},${c.toString(16).padStart(6, '0')}`).join(';')
+
 function castAt(t: number): Cast | null {
   const mu = (t - scene.murasakiSince) / MURASAKI_MS
   if (mu >= 0 && mu < 1) return mu < 0.3 ? 'purple-sign' : mu < 0.5 ? 'purple-pinch' : 'purple-fire'
@@ -708,6 +724,20 @@ function infinityRing({ put }: Canvas, now: number, cx: number, cy: number, rx: 
   }
 }
 
+const SPARKLE_MS = 1800
+const CHECK = ['....#', '...#.', '#.#..', '.#...']
+// The check's pixels are half a mark, never under a pixel: a small tick by the head on every surface
+const checkMark = (mark: number) => Math.max(1, Math.round(mark / 2))
+
+/** The thinking sparkles at `now`, three around the head beside `markX`: where each is and its color. */
+function sparkles(now: number, markX: number, top: number, u: number): Pixel[] {
+  return [0, 1, 2].map(k => {
+    const a = cycle(now, SPARKLE_MS) + (k * Math.PI * 2) / 3
+
+    return [Math.round(markX + 3 * u + Math.cos(a) * 3 * u), Math.round(top + 3 * u + Math.sin(a) * 2 * u), k === 0 ? PALE : ORANGE]
+  })
+}
+
 /**
  * The band at `now`, in three layers: what is behind Gojo and what is in front of him as W × H pixels, row by row
  * (a color each, -1 where nothing is drawn), and Gojo and Yuji apart, so the SVG draws each of their poses once.
@@ -797,29 +827,20 @@ function paintBand(W: number, H: number, now: number, reach = Math.hypot(W, H), 
   // Beside the head: the marks that say what Gojo is up to
   const markX = originX + spriteW
   // A small pixel glyph there, each of its pixels `mark` wide
-  const glyph = (rows: string[], color: number) => {
+  const glyph = (rows: string[], color: number, size = mark) => {
     const gx = markX + 2 * mark
-    rows.forEach((line, j) => [...line].forEach((c, i) => c === '#' && block(gx + i * mark, originY + j * mark, mark, color)))
+    rows.forEach((line, j) => [...line].forEach((c, i) => c === '#' && block(gx + i * size, originY + j * size, size, color)))
   }
 
   // Thinking: three sparkles orbit the head, like the spinner's ✻
-  if (satoru.mood === 'thinking') {
-    for (let k = 0; k < 3; k += 1) {
-      const a = cycle(now, 1800) + (k * Math.PI * 2) / 3
-      const cx = markX + 3 * u + Math.cos(a) * 3 * u
-      const cy = originY + 3 * u + Math.sin(a) * 2 * u
-      block(Math.round(cx), Math.round(cy), mark, k === 0 ? PALE : ORANGE)
-    }
-  }
+  if (satoru.mood === 'thinking') for (const [x, y, color] of sparkles(now, markX, originY, u)) block(x, y, mark, color)
 
   // Asking: a pixel "?" beside the head, blinking
   if (satoru.mood === 'asking' && Math.floor(now / 600) % 2 === 0) glyph(['.##.', '#..#', '..#.', '.#..', '....', '.#..'], PALE)
 
   // Finished: a green check over the head, so a glance says the turn is over; it steps aside while Gojo fights
   // (Blue, Red or Purple out, or the domain open), which is a moment of its own
-  if (satoru.mood === 'done' && !isCasting(now) && !scene.holdBlue && !scene.holdRed && !scene.isDomain) {
-    glyph(['....#', '...#.', '#.#..', '.#...'], DONE_GREEN)
-  }
+  if (satoru.mood === 'done' && !isCasting(now) && !scene.holdBlue && !scene.holdRed && !scene.isDomain) glyph(CHECK, DONE_GREEN, checkMark(mark))
 
   // The other conversations: a square pip each in the top right corner, working ones blinking orange,
   // finished ones green, stopped ones grey
@@ -1136,6 +1157,41 @@ export function bandSvg(W: number, H: number): { source: string; playMs: number;
   const source = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${height}" style="display:block;overflow:hidden">${style}${beyond}${stage}${wordText(height)}</svg>`
 
   return { source, playMs: onceTotal + loopTotal, redrawAt: blindfoldBackAt(), height }
+}
+
+// The desktop Satoru: the band cut down to Gojo and the Blue or Red he holds while writing or reading, out to the
+// sparkles around it; the word goes under his feet, on a line of its own
+const DESK_COLUMNS = 66
+const DESK_ROWS = 30
+const DESK_WORD_PX = 16
+const DESK_WORD_LINE_PX = 24
+
+/**
+ * The band for the desktop Satoru, outside Claude: the same drawing, narrower, without Yuji and Megumi (they need the
+ * band's width and come rarely) nor the other conversations' pips, its word under his feet, outlined to read on any
+ * wallpaper. It leaves the band's lookahead as it found it, so drawing one never moves the other.
+ */
+export function deskSvg(): { source: string; redrawAt: number | null } {
+  const kept = ahead
+  const { others, crew, word } = satoru
+  satoru.others = []
+  satoru.crew = []
+  satoru.word = ''
+  const { source, redrawAt, height } = bandSvg(DESK_COLUMNS, DESK_ROWS)
+  satoru.others = others
+  satoru.crew = crew
+  satoru.word = word
+  ahead = kept
+
+  const width = DESK_COLUMNS * PIXEL_PX
+  const caption = word
+    ? `<text x="${PIXEL_PX * 2}" y="${height + DESK_WORD_PX}" font-family="ui-monospace,Menlo,monospace" font-size="${DESK_WORD_PX}" font-style="italic" fill="${hex(PALE)}" stroke="${hex(OUTLINE)}" stroke-width="4" stroke-linejoin="round" paint-order="stroke">✻ ${escapeXml(word)}</text>`
+    : ''
+
+  return {
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height + DESK_WORD_LINE_PX}" style="display:block">${source}${caption}</svg>`,
+    redrawAt,
+  }
 }
 
 function toBase64(bytes: Uint8Array): string {

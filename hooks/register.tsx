@@ -4,8 +4,7 @@ import { finishMurasaki, fireAka, fireAo, fireMurasaki, isCasting, keptScene, re
 import { lethal, lethalPart } from './lethal'
 import { measure } from './radius'
 import { wordFor } from './words'
-import { DESIGN_MODEL, DESIGN_SAMPLE, ELEVEN_API, ELEVEN_JA_MODEL, ELEVEN_MODEL, GOJO_VOICE, audioOf, createdVoice, firstPreview, firstVoice, lineHash, refusalOf } from './voice'
-import { BAND_MAX_PX, COMPACT_ROWS, bandFrame, bandSvg, satoru, YUJI_WALK_MS } from './satoru'
+import { BAND_MAX_PX, COMPACT_ROWS, bandFrame, bandSvg, deskSvg, satoru, spriteText, YUJI_WALK_MS } from './satoru'
 import type { Mood, SessionState } from './satoru'
 
 // Everything lives in the band above the prompt: Satoru, the techniques to its right, the domain behind
@@ -31,15 +30,17 @@ const HAPPY_MS = 2100
 // A new conversation: Satoru is glad to see you, a little longer than a finished turn
 const GREET_MS = 3500
 
-// Said aloud and shown as a Mac notification when a turn ends, so you can step away while it works; Gojo's swagger
-const DONE_LINES = [
-  'Listo.',
-  'Ya está. Fácil.',
-  'Era de esperarse.',
-  'Terminé. Ni siquiera tuve que quitarme la venda.',
+// Shown when a turn ends, so you can step away while it works, and said in Satoru's voice from its clip in sounds/;
+// a line whose clip isn't there yet is shown and not said
+type DoneLine = { text: string; clip: string }
+const DONE_LINES: DoneLine[] = [
+  { text: 'Listo.', clip: 'done-1' },
+  { text: 'Ya está. Fácil.', clip: 'done-2' },
+  { text: 'Era de esperarse.', clip: 'done-3' },
+  { text: 'Terminé. Ni siquiera tuve que quitarme la venda.', clip: 'done-4' },
 ]
 // With the domain open the swagger is saved for one line, the only one he needs
-const DOMAIN_DONE_LINES = ['Soy el más fuerte.']
+const DOMAIN_DONE_LINES: DoneLine[] = [{ text: 'Soy el más fuerte.', clip: 'done-domain' }]
 const OOPS_MS = 1200
 // The ✓ and the thumbs-up are a moment, then Gojo goes back to rest; the corner pips still say the turn is over
 const DONE_MS = 4000
@@ -67,6 +68,9 @@ const STALE_MS = 12_000
 const FORGET_MS = 24 * 60 * 60 * 1000
 let presence: Timer | undefined
 let sessionFile = ''
+// What the desktop Satoru says once this conversation is done: its folder and the finish line
+let sessionLabel: string | undefined
+let doneLine = ''
 let othersKey = ''
 // The desktop's SVG plays a couple of seconds ahead and loops. Each new one makes the app reload the band, which
 // blinks, so it is sent again only when the look changes, or when a moving scene has played its frames out.
@@ -89,6 +93,7 @@ function animateBand($: $) {
 
 /** Redraws the desktop's band soon, so a new mood or technique doesn't wait for the loop; changes close together share one reload. */
 function redrawDesktop($: $) {
+  redrawDesk($)
   if (!isDesktopShown || pendingRedraw) return
   const wait = Math.max(0, lastDesktopDraw + DESKTOP_MIN_GAP_MS - Date.now())
   pendingRedraw = $.clock.after(wait, () => {
@@ -158,6 +163,38 @@ let hostSession: string | null | undefined
 const CLAUDE_APP = 'com.anthropic.claudefordesktop'
 let isMac: boolean | undefined
 
+// Satoru's own notification, a floating panel, is compiled from its Swift source the first time a session starts on
+// macOS and kept in bin/, out of git. Until it is built, or without swiftc, terminal-notifier and osascript stand in
+const NOTIFY_SOURCE = 'notify/satoru-notify.swift'
+const NOTIFY_BINARY = 'bin/satoru-notify'
+const NOTICE_SECONDS = 6
+let notifyBuild: Promise<string | null> | undefined
+
+/** The panel's binary, built again when its source is newer than it; null where it cannot be built. */
+function satoruNotify($: $) {
+  notifyBuild ??= buildNotify($).catch(() => null)
+
+  return notifyBuild
+}
+
+async function buildNotify($: $) {
+  const source = `${$.plugin.root}/${NOTIFY_SOURCE}`
+  const binary = `${$.plugin.root}/${NOTIFY_BINARY}`
+  const [built, written] = await Promise.all([$.fs.stat(binary).catch(() => undefined), $.fs.stat(source)])
+  if (built && built.mtimeMs >= written.mtimeMs) return binary
+  // Built under another name and moved in at once, so another session never launches it half written
+  const partial = `${binary}.${Date.now()}`
+  await $.process.run(['mkdir', '-p', `${$.plugin.root}/bin`])
+  const compiled = await $.process.run(['swiftc', '-O', '-o', partial, source], { timeoutMs: 180_000 })
+  if (compiled.exitCode !== 0) {
+    $.ui.log(`satoru-notify no compiló: ${compiled.stderr.trim()}`, { to: 'debug' })
+    return null
+  }
+  await $.process.run(['mv', '-f', partial, binary])
+
+  return binary
+}
+
 /** osascript, lsappinfo and terminal-notifier exist only on macOS; elsewhere the engine's own notification stands in. */
 async function onMac($: $) {
   if (isMac !== undefined) return isMac
@@ -221,9 +258,10 @@ async function hostSessionId($: $) {
   return hostSession
 }
 
-/** A notification, only while you are away from Claude. On macOS, clicked it opens this very conversation (without terminal-notifier, a plain one); elsewhere the engine raises it, or a toast where it cannot. */
+/** A notification, only while you are away from Claude, and none while the desktop Satoru is up to say it. On macOS, Satoru's panel, which clicked opens this very conversation (terminal-notifier, or a plain one, until it is built); elsewhere the engine raises it, or a toast where it cannot. */
 async function notifyDone($: $, line: string) {
   if (await isClaudeInFront($)) return
+  if ((await onMac($)) && (await isDeskUp($))) return
   const folder = (await $.session.cwd().catch(() => '')).split('/').filter(Boolean).pop()
   const title = folder ? `∞ Satoru terminó · ${folder}` : '∞ Satoru terminó'
   if (!(await onMac($))) {
@@ -232,6 +270,17 @@ async function notifyDone($: $, line: string) {
     return
   }
   const id = await hostSessionId($)
+  const panel = await satoruNotify($)
+  if (panel) {
+    const open = id ? ['-open', `claude://code/continue?session=${id}`] : []
+    const shown = await $.process
+      .run([panel, '-title', title, '-message', line, '-seconds', String(NOTICE_SECONDS), '-sprite', spriteText('done', scene.isDomain), ...open], {
+        timeoutMs: 600_000,
+      })
+      .catch(() => undefined)
+    // It rejects when it outlives the timeout, hovered all along: seen, so nothing else is raised
+    if (!shown || shown.exitCode === 0) return
+  }
   if (id) {
     for (const notifier of NOTIFIERS) {
       const sent = await $.process
@@ -243,16 +292,23 @@ async function notifyDone($: $, line: string) {
   await $.process.run(['osascript', '-e', `display notification ${appleString(line)} with title ${appleString(title)}`])
 }
 
-/** Says the line aloud, naming the conversation by its folder when it has a real one; ElevenLabs first. */
-async function sayDone($: $, line: string) {
+/** The conversation's folder as words, empty for one the app made for it (scratch-…). */
+async function folderName($: $) {
   const folder = (await $.session.cwd().catch(() => '')).split('/').filter(Boolean).pop() ?? ''
-  const name = folder.startsWith('scratch-') ? '' : folder.replace(/[-_.]+/g, ' ').trim()
-  const text = name ? `${name}: ${line}` : line
-  await sayEleven($, text)
+
+  return folder.startsWith('scratch-') ? '' : folder.replace(/[-_.]+/g, ' ').trim()
 }
 
-// Satoru speaks only after a long turn and while you are away from Claude; short answers end in silence
+/** Says the line aloud from its clip; the conversation's name is the desktop Satoru's balloon to give. */
+async function sayDone($: $, line: DoneLine) {
+  await play($, { asset: `sounds/${line.clip}.mp3` })
+}
+
+// Satoru speaks only after a long turn; short answers end in silence. macOS says whether Claude is in front, so there
+// he speaks after a minute while you are away; Windows and WSL can't tell, so he waits for a turn long enough that
+// you have most likely stepped away
 const SPEAK_AFTER_MS = 60_000
+const SPEAK_BLIND_AFTER_MS = 5 * 60_000
 let turnStartedAt = 0
 
 /** Yuji's subagent answered: he walks back to Gojo, and once there he is gone. */
@@ -273,31 +329,83 @@ async function announceDone($: $) {
   // In the domain the blindfold is off, so he keeps it short and leaves the blindfold out
   const lines = scene.isDomain ? DOMAIN_DONE_LINES : DONE_LINES
   const line = lines[Math.floor(Math.random() * lines.length)]!
-  const isLong = Date.now() - turnStartedAt >= SPEAK_AFTER_MS
-  if (isLong && !(await isClaudeInFront($).catch(() => false))) void sayDone($, line).catch(() => {})
-  void notifyDone($, line).catch(() => {})
+  const tookMs = Date.now() - turnStartedAt
+  const isHeard = (await onMac($))
+    ? tookMs >= SPEAK_AFTER_MS && !(await isClaudeInFront($).catch(() => false))
+    : tookMs >= SPEAK_BLIND_AFTER_MS
+  if (isHeard) void sayDone($, line).catch(() => {})
+  // The desktop Satoru reads it from this conversation's state and says it above him
+  doneLine = line.text
+  void beat($).catch(() => {})
+  void notifyDone($, line.text).catch(() => {})
 }
 
 const myState = (): SessionState => (scene.isWorking ? 'working' : hasFinished ? 'done' : 'idle')
 const STATE_ORDER: SessionState[] = ['working', 'done', 'idle']
 const isSessionState = (value: unknown): value is SessionState => STATE_ORDER.includes(value as SessionState)
 
+const sessionsDir = ($: $) => `${$.plugin.root}/../.infinity-sessions`
+
+/**
+ * Satoru on the desktop, outside Claude: one for every conversation, reading the states beat writes, hidden while
+ * Claude is in front. Started detached so it outlives the conversation that started it; a second copy finds the
+ * first one's lock and leaves, and the last one standing quits once no conversation is left.
+ */
+async function launchDesk($: $) {
+  const binary = await satoruNotify($)
+  if (!binary) return
+  // sh hands "$@" over untouched: nothing of the paths is parsed by the shell
+  await $.process.run(['sh', '-c', 'nohup "$@" >/dev/null 2>&1 &', 'sh', binary, '-watch', sessionsDir($)])
+}
+
+// The desktop Satoru shows this conversation's band from a file beside its state, written again whenever the band
+// would be: as the desktop's, at most once a second, and when the blindfold goes back on
+let pendingDesk: Timer | undefined
+let deskLater: Timer | undefined
+let lastDeskDraw = 0
+
+function redrawDesk($: $) {
+  if (pendingDesk || !sessionFile) return
+  const wait = Math.max(0, lastDeskDraw + DESKTOP_MIN_GAP_MS - Date.now())
+  pendingDesk = $.clock.after(wait, () => {
+    pendingDesk = undefined
+    lastDeskDraw = Date.now()
+    const { source, redrawAt } = deskSvg()
+    deskLater?.cancel()
+    deskLater = redrawAt === null ? undefined : $.clock.after(Math.max(0, redrawAt - Date.now()), () => redrawDesk($))
+    void $.fs.write(`${sessionsDir($)}/${deskFile()}`, source).catch(() => {})
+  })
+}
+
+const deskFile = () => sessionFile.replace(/\.json$/, '.svg')
+
+/** Whether the desktop Satoru is up: then he says the finish line himself, and the panel would say it twice. */
+async function isDeskUp($: $) {
+  const found = await $.process.run(['pgrep', '-f', `${NOTIFY_BINARY} -watch`]).catch(() => undefined)
+
+  return found?.exitCode === 0
+}
+
 /**
  * Writes this conversation's state and reads everyone else's; the band redraws only when the others change. A
  * conversation that ends takes its file with it, and files left by ones that closed without saying so are removed.
  */
 async function beat($: $, state: SessionState | 'ended' = myState()) {
-  const dir = `${$.plugin.root}/../.infinity-sessions`
+  const dir = sessionsDir($)
   if (!sessionFile) sessionFile = `${await $.session.id()}.json`
   // $.fs writes but doesn't remove: rm -f on named files, never a folder
   if (state === 'ended') {
-    await $.process.run(['rm', '-f', `${dir}/${sessionFile}`])
+    await $.process.run(['rm', '-f', `${dir}/${sessionFile}`, `${dir}/${deskFile()}`])
     return
   }
-  await $.fs.write(`${dir}/${sessionFile}`, JSON.stringify({ state }))
+  // The host id lets the desktop Satoru open, clicked, the conversation that finished; the label and the line are
+  // what he says above him then
+  sessionLabel ??= await folderName($)
+  const said = state === 'done' && doneLine ? { label: sessionLabel, line: doneLine } : {}
+  await $.fs.write(`${dir}/${sessionFile}`, JSON.stringify({ state, host: await hostSessionId($), ...said }))
   const now = Date.now()
   const entries = await $.fs.list(dir)
-  const forgotten = entries.filter(f => f.kind === 'file' && f.name.endsWith('.json') && now - f.mtimeMs > FORGET_MS)
+  const forgotten = entries.filter(f => f.kind === 'file' && /\.(json|svg)$/.test(f.name) && now - f.mtimeMs > FORGET_MS)
   if (forgotten.length > 0) void $.process.run(['rm', '-f', ...forgotten.map(f => `${dir}/${f.name}`)]).catch(() => {})
   const fresh = entries.filter(f => f.kind === 'file' && f.name.endsWith('.json') && f.name !== sessionFile && now - f.mtimeMs < STALE_MS)
   const states = await Promise.all(
@@ -312,117 +420,6 @@ async function beat($: $, state: SessionState | 'ended' = myState()) {
   }
 }
 
-// Each line is generated once and kept on disk beside the mods, so a phrase said again costs nothing; any failure
-// (no key, no network, no credit) answers false and the caller falls back to the system voice
-let eleven: { key: string; voice: string } | null | undefined
-// Told once per load why ElevenLabs refused, so a bad key or a missing permission doesn't fail in silence
-let isElevenRefusalTold = false
-
-function tellElevenRefusal($: $, why: string) {
-  if (isElevenRefusalTold) return
-  isElevenRefusalTold = true
-  $.ui.toast(`∞ Satoru no puede hablar con ElevenLabs (${why}).`)
-}
-
-async function envOf($: $, name: string) {
-  const printed = await $.process.run(['printenv', name]).catch(() => undefined)
-
-  return printed?.exitCode === 0 ? printed.stdout.trim() : ''
-}
-
-const DESIGNED_VOICE = 'elevenlabs-voice'
-
-/** Designs Satoru's own voice from a description, plays its preview and keeps it; the answer says how it went. */
-async function designVoice($: $, description: string): Promise<string> {
-  const key = await envOf($, 'ELEVENLABS_API_KEY')
-  if (!key) return 'Falta ELEVENLABS_API_KEY en el bloque env de ~/.claude/settings.json.'
-  if (description.length < 20) return 'Describe la voz con al menos 20 caracteres, o usa /voz sin nada para la de Gojo.'
-  const headers = { 'xi-api-key': key, 'Content-Type': 'application/json' }
-  const designed = await $.http.fetch(`${ELEVEN_API}/text-to-voice/design`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ voice_description: description, text: DESIGN_SAMPLE, model_id: DESIGN_MODEL }),
-  })
-  if (!designed.ok) return `ElevenLabs no pudo diseñarla (${refusalOf(designed.status, designed.text)}).`
-  const preview = firstPreview(designed.text)
-  if (!preview) return 'ElevenLabs no devolvió ninguna muestra.'
-  if (preview.audio) void play($, { base64: preview.audio, mime: 'audio/mpeg' }).catch(() => {})
-  const created = await $.http.fetch(`${ELEVEN_API}/text-to-voice`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ voice_name: 'Satoru', voice_description: description, generated_voice_id: preview.id }),
-  })
-  const voice = created.ok ? createdVoice(created.text) : ''
-  if (!voice) return `ElevenLabs no pudo guardarla (${refusalOf(created.status, created.text)}).`
-  await $.store.set(DESIGNED_VOICE, voice)
-  // The next line looks the voice up again
-  eleven = undefined
-  isElevenRefusalTold = false
-
-  return `Voz nueva guardada en tu cuenta como "Satoru" (${voice}). Escucha la muestra; si no te convence, /voz otra vez con otra descripción.`
-}
-
-/** The key and the voice, looked up once: settings, then the one /voz designed, then the account's first. */
-async function elevenSettings($: $) {
-  if (eleven !== undefined) return eleven
-  const key = await envOf($, 'ELEVENLABS_API_KEY')
-  // A voice set in settings wins, then the one /voz designed, then one of the account's default voices
-  const designed = await $.store.get(DESIGNED_VOICE).catch(() => undefined)
-  let voice = (await envOf($, 'ELEVENLABS_VOICE_ID')) || (typeof designed === 'string' ? designed : '')
-  if (key && !voice) {
-    const listed = await $.http.fetch(`${ELEVEN_API}/voices`, { headers: { 'xi-api-key': key } }).catch(() => undefined)
-    voice = listed?.ok ? firstVoice(listed.text) : ''
-    // The key can't list voices: new keys come without that permission, and without it no default voice is found
-    if (listed && !listed.ok) tellElevenRefusal($, `${refusalOf(listed.status, listed.text)}; dale a la key el permiso Voices: Read`)
-  }
-  if (key && !voice) tellElevenRefusal($, 'no encontré ninguna voz en tu cuenta')
-  eleven = key && voice ? { key, voice } : null
-
-  return eleven
-}
-
-/** Says `text` in the ElevenLabs voice; false when it could not, so the caller speaks it some other way. */
-async function sayEleven($: $, text: string, isJapanese = false, gain = 1): Promise<boolean> {
-  try {
-    const found = await elevenSettings($)
-    if (!found) return false
-    const model = isJapanese ? ELEVEN_JA_MODEL : ELEVEN_MODEL
-    const file = `${$.plugin.root}/../.infinity-voices/${lineHash(`${found.voice}|${model}|${text}`)}.b64`
-    let base64 = (await $.fs.exists(file)) ? String(await $.fs.read(file)) : ''
-    if (!base64) {
-      const made = await $.http.fetch(`${ELEVEN_API}/text-to-speech/${found.voice}/with-timestamps`, {
-        method: 'POST',
-        headers: { 'xi-api-key': found.key, 'Content-Type': 'application/json' },
-        body: JSON.stringify(isJapanese ? { text, model_id: model, language_code: 'ja' } : { text, model_id: model }),
-      })
-      if (!made.ok) {
-        tellElevenRefusal($, refusalOf(made.status, made.text))
-        return false
-      }
-      base64 = audioOf(made.text)
-      if (!base64) return false
-      await $.fs.write(file, base64)
-    }
-    await play($, { base64, mime: 'audio/mpeg' }, gain)
-
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
- * The technique's line: sounds/<name>-voice.mp3 when there is one, so it needs no key nor network;
- * else Satoru's ElevenLabs voice, and without it the techniques keep their sound effects and stay silent.
- */
-async function speak($: $, name: string, text: string) {
-  try {
-    await play($, { asset: `sounds/${name}-voice.mp3` }, TECHNIQUE_VOICE_GAIN)
-    return
-  } catch {}
-  await sayEleven($, text, true, TECHNIQUE_VOICE_GAIN)
-}
-
 const TECHNIQUE_DUCKED_GAIN = 0.4
 // The kya when Infinity blocks a command, at half volume: at full it startles
 const KYA_GAIN = 0.5
@@ -433,15 +430,15 @@ const TECHNIQUE_VOICE_GAIN = 0.5
  * A technique's sound, all in sounds/: a whole clip of its own (murasaki.mp3, domain.mp3) plays alone; without one,
  * <name>-effect.wav plays with <name>-voice.mp3 over it (ao, aka).
  */
-async function cast($: $, name: string, voiceLine?: string) {
+async function cast($: $, name: string) {
   try {
     await play($, { asset: `sounds/${name}.mp3` })
     return
   } catch {}
-  // Under a spoken line the effect ducks, so the voice saying the technique's name comes through
+  // Under the voice the effect ducks, so the technique's name comes through
   await Promise.all([
-    play($, { asset: `sounds/${name}-effect.wav` }, voiceLine ? TECHNIQUE_DUCKED_GAIN : 0.7).catch(() => {}),
-    voiceLine ? speak($, name, voiceLine).catch(() => {}) : undefined,
+    play($, { asset: `sounds/${name}-effect.wav` }, TECHNIQUE_DUCKED_GAIN).catch(() => {}),
+    play($, { asset: `sounds/${name}-voice.mp3` }, TECHNIQUE_VOICE_GAIN).catch(() => {}),
   ])
 }
 
@@ -459,7 +456,7 @@ function murasaki($: $) {
   }
   fireMurasaki()
   redrawDesktop($)
-  void cast($, 'murasaki', '[calm, confident] きょしき… むらさき。')
+  void cast($, 'murasaki').catch(() => {})
   return 'Púrpura.'
 }
 
@@ -467,7 +464,7 @@ function ao($: $) {
   if (isCasting()) return BUSY
   fireAo()
   redrawDesktop($)
-  void cast($, 'ao', '[calm, confident] じゅつしきじゅんてん… あお。')
+  void cast($, 'ao').catch(() => {})
   return scene.holdRed ? 'Azul. Rojo te espera: /murasaki.' : 'Azul.'
 }
 
@@ -475,7 +472,7 @@ function aka($: $) {
   if (isCasting()) return BUSY
   fireAka()
   redrawDesktop($)
-  void cast($, 'aka', '[calm, confident] じゅつしきはんてん… あか。')
+  void cast($, 'aka').catch(() => {})
   return scene.holdBlue ? 'Rojo. Azul te espera: /murasaki.' : 'Rojo.'
 }
 
@@ -499,24 +496,21 @@ export const register: Register = on => {
       $.command.register({ name: 'aka', description: 'Rojo: carga y lo repele todo con una onda expansiva' }),
       $.command.register({ name: 'murasaki', description: 'Púrpura: Azul y Rojo se funden y borran todo a su paso' }),
       $.command.register({ name: 'domain', description: 'Expansión de Dominio: Vacío Ilimitado (on/off)' }),
-      $.command.register({ name: 'satoru', description: 'Muestra u oculta a Satoru sobre el input' }),
-      $.command.register({ name: 'voz', description: 'Diseña la voz de Satoru en ElevenLabs (sin texto: la de Gojo)', argumentHint: '[descripción de la voz]' }),
-    ])
+      $.command.register({ name: 'satoru', description: 'Muestra u oculta a Satoru sobre el input' }),    ])
     restoreScene((await $.store.get(KEPT_SCENE).catch(() => undefined)) as Parameters<typeof restoreScene>[0])
     // The domain used to pin a status line; a reload clears whatever is left of it
     $.ui.status(undefined)
     feel($, 'happy', GREET_MS)
     presence?.cancel()
     presence = $.clock.every(PRESENCE_MS, () => void beat($).catch(() => {}))
-    void beat($).catch(() => {})
+    // The first beat names this conversation's files; the desktop Satoru's band goes beside them
+    void beat($).then(() => redrawDesk($)).catch(() => {})
     void checkContext($).catch(() => {})
+    void onMac($).then(isOnMac => isOnMac && launchDesk($)).catch(() => {})
 
     return next(e)
   })
 
-  on('command.run', { command: 'voz' }, async ($, e) => ({
-    text: await designVoice($, e.args.trim() || GOJO_VOICE).catch(error => `No se pudo crear la voz: ${String(error)}`),
-  }))
   on('command.run', { command: 'murasaki' }, async $ => ({ text: murasaki($) }))
   on('command.run', { command: 'ao' }, async $ => ({ text: ao($) }))
   on('command.run', { command: 'aka' }, async $ => ({ text: aka($) }))
@@ -524,7 +518,7 @@ export const register: Register = on => {
   on('command.run', { command: 'domain' }, async $ => {
     const isOn = toggleDomain()
     void $.store.set(KEPT_SCENE, keptScene()).catch(() => {})
-    if (isOn) void cast($, 'domain', '[calm, confident] りょういきてんかい… むりょうくうしょ。')
+    if (isOn) void cast($, 'domain').catch(() => {})
     redrawDesktop($)
   
     return { text: isOn ? 'Expansión de Dominio: Vacío Ilimitado.' : 'Dominio cerrado.' }
@@ -553,6 +547,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     scene.isWorking = true
     hasFinished = false
+    doneLine = ''
     hasRead = false
     hasWritten = false
     turnStartedAt = Date.now()
