@@ -121,10 +121,21 @@ function stopBand() {
   band = { requestId: '', columns: 0, rows: BAND_ROWS }
 }
 
+// A call is being put to you (a permission dialog): the band is the dialog's while it lasts
+let isAsking = false
+
+function setAsking($: $, value: boolean) {
+  if (isAsking === value) return
+  isAsking = value
+  $.ui.invalidate('ui.render')
+}
+
 function feel($: $, mood: Mood, ms?: number) {
   settle?.cancel()
   settle = undefined
   const hasChanged = satoru.mood !== mood
+  // Asking hands the band over and gets it back: the terminal's band stopped drawing, so it is drawn anew
+  if (hasChanged && (mood === 'asking' || satoru.mood === 'asking')) $.ui.invalidate('ui.render')
   satoru.mood = mood
   satoru.since = Date.now()
   if (ms !== undefined) {
@@ -563,6 +574,8 @@ export const register: Register = on => {
       return next(e)
     }
     scene.isWorking = false
+    // A turn stopped mid-dialog leaves nothing asked
+    setAsking($, false)
     // A stopped turn takes its subagents with it: their Yuji come back
     if (e.isAborted) for (const yuji of satoru.crew) yujiDone($, yuji.id)
     hasFinished = !e.isAborted && e.reason === 'answer'
@@ -597,7 +610,13 @@ export const register: Register = on => {
   on('tool.check', async ($, e, next) => {
     const command = e.tool === 'Bash' ? (e.input as { command?: unknown }).command : undefined
     const part = typeof command === 'string' ? lethalPart(command) : null
-    if (!part) return next(e)
+    if (!part) {
+      const verdict = await next(e)
+      // A real call that will be put to you: Gojo steps out of the band while the dialog asks
+      if (verdict.decision === 'ask' && e.tool_use_id !== undefined) setAsking($, true)
+
+      return verdict
+    }
     // Only a real call hits the ring, with a kya!; a query asks nothing of anyone
     if (e.tool_use_id !== undefined) {
       scene.infinitySince = Date.now()
@@ -605,6 +624,8 @@ export const register: Register = on => {
       void play($, { asset: 'sounds/kya.mp3' }, KYA_GAIN).catch(() => {})
     }
     const radius = await measure($, part).catch(() => ['No pude medir qué tocaría.'])
+    // He flinches while it's measured; he steps aside only now, as the dialog comes up
+    if (e.tool_use_id !== undefined) setAsking($, true)
 
     return { decision: 'ask', reason: [`∞ Infinity: "${part.label}" es irreversible.`, ...radius].join('\n') }
   }).catch(($, e, next) => {
@@ -621,6 +642,8 @@ export const register: Register = on => {
     const isSpawn = e.tool === 'Agent'
     if (!isSpawn) feel($, moodOf(e.tool))
     const ran = await next(e)
+    // Answered: whatever was asked about this call is over, and Gojo comes back
+    setAsking($, false)
     const hasFailed = ran.deny !== undefined || ran.isError === true
     if (!hasFailed && READING_TOOLS.has(e.tool)) hasRead = true
     if (!hasFailed && WRITING_TOOLS.has(e.tool)) hasWritten = true
@@ -637,8 +660,10 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    // A survey owns the band while it asks
-    if (!isSatoruShown || e.props.hasSurvey) return next(e)
+    // A survey owns the band while it asks. On the terminal so does a question, a plan to approve or a permission
+    // dialog, which draw where he stands; the desktop app clears the band for them itself
+    const isAskedOnTerminal = e.surface === 'terminal' && (isAsking || satoru.mood === 'asking')
+    if (!isSatoruShown || e.props.hasSurvey || isAskedOnTerminal) return next(e)
     if (e.surface === 'desktop') {
       const { Svg } = $.ui.resolve(e)
       const { source, redrawAt, height } = bandSvg(DESKTOP_COLUMNS, DESKTOP_ROWS)
