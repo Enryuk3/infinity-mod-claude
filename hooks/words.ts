@@ -13,11 +13,13 @@ const WORDS: Record<Mood, string[]> = {
   happy: ['¡Yosh!', '¡Hola!', '¡Aquí estoy!'],
   oops: ['¡Tch!', '¡Recórcholis!', '¡Uy!'],
   done: ['Listo', 'Hecho', 'Pan comido', 'Ni sudé', 'Obvio'],
-  idle: ['Remoloneando', 'Holgazaneando', 'Tomando aire', 'En pausa', 'Al acecho'],
+  // At rest he is simply there: no word, in the band, the terminal or on the desktop
+  idle: [],
 }
 
-/** A word for the mood, never the one just shown; exclamations stand alone, the rest trail off. */
+/** A word for the mood, never the one just shown; exclamations stand alone, the rest trail off; none at rest. */
 export function wordFor(mood: Mood, previous = ''): string {
+  if (WORDS[mood].length === 0) return ''
   const options = WORDS[mood].filter(w => w !== previous.replace(/…$/, ''))
   const word = options[Math.floor(Math.random() * options.length)] ?? WORDS[mood][0]!
 
