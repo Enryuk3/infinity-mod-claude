@@ -51,9 +51,11 @@ Un comando que solo menciona uno de esos, como un patrón de búsqueda o un mens
 - `/satoru`: muestra u oculta a Satoru
 - `/ao`, `/aka`, `/murasaki`: Azul, Rojo y Púrpura
 - `/domain`: Expansión de Dominio
-- `/voz [descripción]`: diseña la voz de Satoru en ElevenLabs
 
-## Opcional
+## Fuera de Claude (macOS)
 
-- `ELEVENLABS_API_KEY` (y `ELEVENLABS_VOICE_ID`) en el bloque `env` de `~/.claude/settings.json` para la voz.
-- En macOS, `brew install terminal-notifier` para que la notificación abra la conversación al hacer clic.
+- **Satoru en el escritorio**: mientras haya una conversación abierta, Gojo flota sobre tu escritorio con la misma banda en vivo (la venda, el Azul al escribir, el Rojo al leer, la palabra bajo sus pies). Se oculta cuando Claude está al frente.
+- **Al terminar** una conversación sale un globo sobre su cabeza hasta que la veas; clic en él o en Gojo la abre.
+- **Moverlo**: arrástralo; mientras lo sostienes, un borde punteado marca todo su espacio.
+- **Ocultarlo**: clic derecho → "Ocultar a Satoru" lo guarda como ∞ en la barra de menú (∞✓ si algo terminó); un clic en el ∞ lo trae de vuelta.
+- El mod se carga al abrir cada conversación: tras actualizarlo, las que ya estaban abiertas siguen con el anterior hasta reiniciarlas.
