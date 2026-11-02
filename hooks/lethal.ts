@@ -134,6 +134,21 @@ function programOf(bare: string): string {
   return (words[k] ?? '').replace(/^.*\//, '')
 }
 
+// Temporary folders: what is removed in them was made to be thrown away. The variables are read as written, since they
+// name a temporary folder wherever they are set
+const TEMP_ROOTS = /^(\/private)?\/tmp\/|^\/var\/tmp\/|^(\/private)?\/var\/folders\/|^\$\{?(TMPDIR|TEMP|TMP)\}?\//
+
+/** A path inside a temporary folder, never the folder itself, and none that climbs out of it with `..`. */
+const isTempPath = (path: string) => TEMP_ROOTS.test(path) && !/(^|\/)\.\.(\/|$)/.test(path) && !/^\/\**$/.test(path.replace(TEMP_ROOTS, '/'))
+
+/** Whether every folder an `rm -r` removes is inside a temporary one, relative ones by the folder an earlier `cd` left. */
+function removesOnlyTemp(words: string[], dir: string | null): boolean {
+  const targets = words.slice(words.indexOf('rm') + 1).filter(word => !word.startsWith('-'))
+  const base = dir?.replace(/\/?$/, '/')
+
+  return targets.length > 0 && targets.every(path => isTempPath(path.startsWith('/') || path.startsWith('$') || !base ? path : base + path))
+}
+
 /**
  * The irreversible part of a command line: its label, the words of the command that does it, the folder an earlier
  * `cd` moved to, if any, and whether it runs on another machine (over ssh), where nothing can be measured from here.
@@ -144,7 +159,8 @@ function shellPart(command: string, depth: number, isRemote: boolean): LethalPar
   let dir: string | null = null
   for (const { bare, quoted, words } of segments(command)) {
     const found = SHELL.find(([pattern]) => pattern.test(bare))
-    if (found) return { label: found[1], words, dir, isRemote, sql: null }
+    // Removing what lives in temporary folders, often scratch Claude made itself, is no loss
+    if (found && !(found[1] === 'rm -r' && removesOnlyTemp(words, dir))) return { label: found[1], words, dir, isRemote, sql: null }
     const program = programOf(bare)
     if (program === 'cd' || program === 'pushd') dir = words[1] ?? null
     // bash -c '…', eval '…', ssh host '…': the string they get is run

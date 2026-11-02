@@ -24,6 +24,12 @@ const LETHAL_COMMANDS: [string, string][] = [
   ['echo "$(rm -rf dist)"', 'rm -r'],
   ["psql <<'SQL'\nDROP TABLE players;\nSQL", 'DROP/TRUNCATE'],
   ['echo "DROP TABLE players" | psql', 'DROP/TRUNCATE'],
+  // A temporary folder itself, one climbed out of, or one beside another that isn't temporary, is still asked about
+  ['rm -rf /tmp', 'rm -r'],
+  ['rm -rf "$TMPDIR"/*', 'rm -r'],
+  ['rm -rf /tmp/../home/satoru', 'rm -r'],
+  ['rm -rf /tmp/build dist', 'rm -r'],
+  ['cd /tmp && rm -rf ../etc', 'rm -r'],
 ]
 const SAFE = [
   'git push origin main --force-with-lease', 'git clean -n', 'rm notes.txt', 'pnpm lint', 'git checkout main',
@@ -32,6 +38,9 @@ const SAFE = [
   // Only naming one, as a search pattern, a message or a line printed, runs nothing
   'rg -n "rm -rf" src', `grep -rn 'git push --force' docs`, 'git commit -m "docs: explain the rm -rf guard"',
   `echo 'git reset --hard'`, 'rg "DROP TABLE" migrations', `sd 'TRUNCATE TABLE' 'DELETE FROM' schema.sql`,
+  // What lives in a temporary folder, often Claude's own scratch, was made to be thrown away
+  'rm -rf /tmp/satoru-build', 'rm -rf "$TMPDIR/frames"', 'rm -rf ${TEMP}/out /var/tmp/cache',
+  'rm -rf /private/var/folders/x1/T/clips', 'rm -rf /private/tmp/claude-501/scratchpad/frames', 'cd /tmp/work && rm -rf dist',
 ]
 
 const run = ($: Parameters<TestBody>[0], command: string) =>
